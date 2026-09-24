@@ -2878,7 +2878,10 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     };
 
     function elixWordXml(s){
+        // XML 1.0 no permite determinados caracteres de control.
+        // Quitarlos aquí evita que una respuesta válida produzca un DOCX reparable.
         return String(s??'')
+            .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g,'')
             .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
             .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
     }
@@ -2888,13 +2891,18 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     function elixWordRunTexto(texto, formato={}){
         const partes=String(texto??'').split('\n');
         const props=[];
+
+        // WordprocessingML exige un orden concreto dentro de w:rPr.
+        // Mantenerlo evita reparaciones silenciosas o avisos de contenido ilegible.
+        if(formato.code) props.push('<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/>');
         if(formato.bold) props.push('<w:b/>');
         if(formato.italic) props.push('<w:i/>');
-        if(formato.underline) props.push('<w:u w:val="single"/>');
         if(formato.color) props.push(`<w:color w:val="${elixWordAttr(formato.color)}"/>`);
-        if(formato.code) props.push('<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="19"/>');
+        if(formato.code) props.push('<w:sz w:val="19"/>');
+        if(formato.underline) props.push('<w:u w:val="single"/>');
         if(formato.sup) props.push('<w:vertAlign w:val="superscript"/>');
-        if(formato.sub) props.push('<w:vertAlign w:val="subscript"/>');
+        else if(formato.sub) props.push('<w:vertAlign w:val="subscript"/>');
+
         const rPr=props.length?`<w:rPr>${props.join('')}</w:rPr>`:'';
         return partes.map((p,i)=>`${i?'<w:r><w:br/></w:r>':''}<w:r>${rPr}<w:t xml:space="preserve">${elixWordXml(p)}</w:t></w:r>`).join('');
     }
@@ -3128,7 +3136,17 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
             const href=String(node.getAttribute('href')||'').trim();
             const inner=await elixWordInlineDesdeNodos(Array.from(node.childNodes),state,{...fmt,underline:true,color:'1D4ED8'});
             if(!href) return inner;
-            const rid=elixWordRelacion(state,'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',href,'External');
+
+            // Solo generamos relaciones externas con URI válida.
+            // Anclas internas, javascript: o data: quedan como texto para no corromper .rels.
+            let target='';
+            try{
+                const u=new URL(href,location.href);
+                if(['http:','https:','mailto:'].includes(u.protocol)) target=u.href;
+            }catch(_){}
+            if(!target) return inner;
+
+            const rid=elixWordRelacion(state,'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',target,'External');
             return `<w:hyperlink r:id="${rid}" w:history="1">${inner}</w:hyperlink>`;
         }
 
@@ -3181,22 +3199,33 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     async function elixWordTabla(node,state){
         const rows=Array.from(node.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tr'));
         const reales=rows.length?rows:Array.from(node.querySelectorAll('tr'));
+        if(!reales.length) return '';
+
+        const maxCols=Math.max(1,...reales.map(row=>Array.from(row.children).filter(c=>['TD','TH'].includes(c.tagName.toUpperCase())).length));
+        const tableWidth=9000;
+        const colWidth=Math.max(600,Math.floor(tableWidth/maxCols));
+        const grid=`<w:tblGrid>${Array.from({length:maxCols},()=>`<w:gridCol w:w="${colWidth}"/>`).join('')}</w:tblGrid>`;
+
         let trs='';
         for(let ri=0;ri<reales.length;ri++){
             const row=reales[ri];
             const cells=Array.from(row.children).filter(c=>['TD','TH'].includes(c.tagName.toUpperCase()));
             let tcs='';
             for(const cell of cells){
-                const isHead=cell.tagName.toUpperCase()==='TH' || ri===0 && reales[0].querySelector('th');
+                const isHead=cell.tagName.toUpperCase()==='TH' || (ri===0 && !!reales[0].querySelector('th'));
                 let contenido='';
                 const blockKids=Array.from(cell.children).filter(c=>['P','DIV','UL','OL','PRE','BLOCKQUOTE'].includes(c.tagName.toUpperCase()));
                 if(blockKids.length) contenido=await elixWordBloquesDesdeContainer(cell,state,true);
                 else contenido=await elixWordParrafoNodo(cell,state,'Normal','<w:spacing w:after="0"/>');
-                tcs+=`<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/>${isHead?'<w:shd w:val="clear" w:fill="EDEFF2"/>':''}</w:tcPr>${contenido}</w:tc>`;
+
+                // w:tcW debe preceder a w:shd dentro de w:tcPr.
+                tcs+=`<w:tc><w:tcPr><w:tcW w:w="${colWidth}" w:type="dxa"/>${isHead?'<w:shd w:val="clear" w:fill="EDEFF2"/>':''}</w:tcPr>${contenido || '<w:p/>'}</w:tc>`;
             }
             trs+=`<w:tr><w:trPr><w:cantSplit/></w:trPr>${tcs}</w:tr>`;
         }
-        return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="888888"/><w:left w:val="single" w:sz="6" w:color="888888"/><w:bottom w:val="single" w:sz="6" w:color="888888"/><w:right w:val="single" w:sz="6" w:color="888888"/><w:insideH w:val="single" w:sz="4" w:color="B0B0B0"/><w:insideV w:val="single" w:sz="4" w:color="B0B0B0"/></w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="110" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="110" w:type="dxa"/></w:tblCellMar></w:tblPr>${trs}</w:tbl>`;
+
+        // tblGrid es parte estructural del esquema de tablas WordprocessingML.
+        return `<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="6" w:color="888888"/><w:left w:val="single" w:sz="6" w:color="888888"/><w:bottom w:val="single" w:sz="6" w:color="888888"/><w:right w:val="single" w:sz="6" w:color="888888"/><w:insideH w:val="single" w:sz="4" w:color="B0B0B0"/><w:insideV w:val="single" w:sz="4" w:color="B0B0B0"/></w:tblBorders><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="110" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:right w:w="110" w:type="dxa"/></w:tblCellMar></w:tblPr>${grid}${trs}</w:tbl>`;
     }
 
     async function elixWordBloque(node,state){
@@ -3256,7 +3285,63 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     }
 
     function elixWordStylesXml(){
-        return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="Aptos"/><w:sz w:val="22"/><w:lang w:val="es-EC"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="140" w:line="300" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="140" w:line="300" w:lineRule="auto"/></w:pPr><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="300" w:after="140"/></w:pPr><w:rPr><w:b/><w:sz w:val="34"/><w:color w:val="111111"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="260" w:after="120"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:color w:val="1F2937"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="220" w:after="100"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:color w:val="374151"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="180" w:after="90"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:color w:val="374151"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ElixQuote"><w:name w:val="Elix Quote"/><w:basedOn w:val="Normal"/><w:pPr><w:shd w:val="clear" w:fill="F5F5F5"/><w:spacing w:before="80" w:after="140"/><w:ind w:left="360"/></w:pPr><w:rPr><w:i/><w:color w:val="4B5563"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ElixCode"><w:name w:val="Elix Code"/><w:basedOn w:val="Normal"/><w:pPr><w:shd w:val="clear" w:fill="F3F4F6"/><w:spacing w:before="100" w:after="160"/><w:ind w:left="180" w:right="180"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="19"/></w:rPr></w:style></w:styles>`;
+        // Orden estricto de propiedades OOXML: rFonts -> b/i -> color -> size.
+        return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="es-EC"/></w:rPr></w:rPrDefault>
+    <w:pPrDefault><w:pPr><w:spacing w:after="140" w:line="300" w:lineRule="auto"/></w:pPr></w:pPrDefault>
+  </w:docDefaults>
+
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/><w:qFormat/>
+    <w:pPr><w:spacing w:after="140" w:line="300" w:lineRule="auto"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:color w:val="111111"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+    <w:pPr><w:keepNext/><w:spacing w:before="300" w:after="140"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="111111"/><w:sz w:val="34"/><w:szCs w:val="34"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+    <w:pPr><w:keepNext/><w:spacing w:before="260" w:after="120"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="1F2937"/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="Heading3">
+    <w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+    <w:pPr><w:keepNext/><w:spacing w:before="220" w:after="100"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="374151"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="Heading4">
+    <w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+    <w:pPr><w:keepNext/><w:spacing w:before="180" w:after="90"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="374151"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="ElixQuote">
+    <w:name w:val="Elix Quote"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:shd w:val="clear" w:fill="F5F5F5"/><w:spacing w:before="80" w:after="140"/><w:ind w:left="360"/></w:pPr>
+    <w:rPr><w:i/><w:color w:val="4B5563"/></w:rPr>
+  </w:style>
+
+  <w:style w:type="paragraph" w:styleId="ElixCode">
+    <w:name w:val="Elix Code"/><w:basedOn w:val="Normal"/>
+    <w:pPr><w:shd w:val="clear" w:fill="F3F4F6"/><w:spacing w:before="100" w:after="160"/><w:ind w:left="180" w:right="180"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="19"/><w:szCs w:val="19"/></w:rPr>
+  </w:style>
+</w:styles>`;
+    }
+
+    function elixWordValidarXml(nombre,xml){
+        const doc=new DOMParser().parseFromString(String(xml||''),'application/xml');
+        if(doc.querySelector('parsererror')){
+            throw new Error(`Elix AI detectó XML inválido en ${nombre} antes de crear el Word.`);
+        }
     }
 
     async function elixExportarWord(scope='chat',chatId=null){
@@ -3296,7 +3381,19 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
             const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
             const now=new Date().toISOString();
             const core=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${elixWordXml(titulo)}</dc:title><dc:creator>InOutBio.Os</dc:creator><cp:lastModifiedBy>Elix AI</cp:lastModifiedBy><dc:rights>© InOutBio.Os</dc:rights><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
-            const app=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Elix AI</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>1.0</AppVersion></Properties>`;
+            const app=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Template>Normal.dotm</Template><TotalTime>0</TotalTime><Pages>1</Pages><Words>0</Words><Characters>0</Characters><Application>Elix AI</Application><DocSecurity>0</DocSecurity><Lines>0</Lines><Paragraphs>0</Paragraphs><ScaleCrop>false</ScaleCrop><Manager></Manager><Company>InOutBio.Os</Company><LinksUpToDate>false</LinksUpToDate><CharactersWithSpaces>0</CharactersWithSpaces><SharedDoc>false</SharedDoc><HyperlinkBase></HyperlinkBase><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion></Properties>`;
+
+            const stylesXml=elixWordStylesXml();
+
+            // Validación de XML antes de empaquetar. Si algo se rompe, no descargamos
+            // un archivo que Word vaya a intentar reparar.
+            elixWordValidarXml('word/document.xml',documentXml);
+            elixWordValidarXml('word/styles.xml',stylesXml);
+            elixWordValidarXml('word/_rels/document.xml.rels',docRels);
+            elixWordValidarXml('[Content_Types].xml',contentTypes);
+            elixWordValidarXml('_rels/.rels',rootRels);
+            elixWordValidarXml('docProps/core.xml',core);
+            elixWordValidarXml('docProps/app.xml',app);
 
             const zip=new JSZip();
             zip.file('[Content_Types].xml',contentTypes);
@@ -3304,7 +3401,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
             zip.folder('docProps').file('core.xml',core).file('app.xml',app);
             const word=zip.folder('word');
             word.file('document.xml',documentXml);
-            word.file('styles.xml',elixWordStylesXml());
+            word.file('styles.xml',stylesXml);
             word.folder('_rels').file('document.xml.rels',docRels);
             for(const media of state.media) word.file(media.path,media.bytes,{binary:true});
 
