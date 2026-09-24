@@ -1892,6 +1892,16 @@ Objetivo: entregar una respuesta técnicamente sólida, clara y suficientemente 
     .elix-legal-box h3 { color:#fafafa; margin:18px 0 6px; font-size:.95rem; }
     .elix-legal-box p { color:#a1a1aa; line-height:1.62; font-size:.86rem; }
     .elix-legal-close { float:right; border:1px solid #3f3f46; background:#18181b; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; }
+    .elix-manual-box { width:min(900px,100%); max-height:min(86vh,820px); }
+    .elix-manual-intro { padding:12px 14px; border:1px solid #27272a; background:#0b1220; border-radius:12px; margin:12px 0 18px; }
+    .elix-manual-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:12px 0; }
+    .elix-manual-card { border:1px solid #27272a; background:#0d0d0f; border-radius:12px; padding:13px 14px; }
+    .elix-manual-card h3 { margin-top:0; color:#93c5fd; }
+    .elix-manual-card p, .elix-manual-box li { color:#a1a1aa; line-height:1.55; font-size:.84rem; }
+    .elix-manual-box ul { padding-left:20px; margin:7px 0; }
+    .elix-manual-example { display:block; margin:7px 0; padding:9px 10px; border-radius:9px; background:#18181b; border:1px solid #27272a; color:#d4d4d8; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.78rem; }
+    .elix-manual-note { border-left:3px solid #3b82f6; padding:8px 12px; margin:10px 0; background:rgba(59,130,246,.07); color:#bfc7d5; font-size:.82rem; line-height:1.55; }
+    @media (max-width:700px){ .elix-manual-grid{grid-template-columns:1fr;} .elix-manual-box{padding:18px;} }
 
     /* ---- Documento exclusivo para impresión/PDF ---- */
     #elix-print-root { display:none; }
@@ -2555,17 +2565,25 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
 
     function elixUltimaRespuestaNueva(chat, desdeIndice){
         if(!chat) return null;
-        const nuevos=(chat.messages||[]).slice(Math.max(0,desdeIndice||0));
-        return [...nuevos].reverse().find(m=>m?.role==='assistant' && !m?.isError && String(m?.content||'').trim()) || null;
+        const nuevos=(chat.messages||[]).map((m,index)=>({m,index})).slice(Math.max(0,desdeIndice||0));
+        return [...nuevos].reverse().find(x=>x.m?.role==='assistant' && !x.m?.isError && String(x.m?.content||'').trim()) || null;
     }
 
     async function elixEjecutarExportacionExistente(det, ordenVisible){
         const resuelto=elixResolverChatExportacion(det);
         if(!resuelto.found || !resuelto.chat){
             agregarMensajeUI('user',ordenVisible,null,[]);
-            agregarMensajeUI('assistant','No encontré con suficiente seguridad el chat que quieres exportar. Escribe una parte más clara de su nombre.',null,[]);
+            agregarMensajeUI('assistant','No encontré con suficiente seguridad el chat que quieres exportar. Escribe una parte más clara del nombre o del tema.',null,[]);
             return;
         }
+
+        const paquete=await elixResolverPaqueteExportacion(det,resuelto.chat,ordenVisible);
+        if(!paquete?.mensajes?.length){
+            agregarMensajeUI('user',ordenVisible,null,[]);
+            agregarMensajeUI('assistant','No pude identificar con suficiente seguridad la parte exacta que quieres exportar. Indica el tema, la última respuesta o pide el chat completo.',null,[]);
+            return;
+        }
+
         const input=document.getElementById('user-input');
         if(input){ input.value=''; input.style.height='auto'; }
         agregarMensajeUI('user',ordenVisible,null,[]);
@@ -2573,7 +2591,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         agregarMensajeUI('assistant',`Preparando tu ${nombreFormato}. En breve comenzará la descarga.`,null,[]);
         try{
             setCargando(true,`📄 Elix AI preparando ${nombreFormato}...`);
-            await window.elixExportarDocumento('chat',det.format,resuelto.chat.id);
+            await window.elixExportarDocumento('chat',det.format,resuelto.chat.id,paquete.mensajes,paquete.titulo,{presentation:paquete.presentation});
         }catch(error){
             console.error('Elix AI · exportación directa:',error);
             agregarMensajeUI('assistant',`No se pudo preparar el ${nombreFormato}. Inténtalo nuevamente.`,null,[]);
@@ -2595,7 +2613,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         window.ELIX_PROMPT_MODELO_LIMPIO=clean;
 
         try{
-            // Los adjuntos también se interpretan con la tarea limpia, nunca con la frase de exportación.
+            // Los adjuntos se interpretan con la tarea limpia; nunca con la instrucción de Word/PDF.
             if(elixAdjuntosPendientes.length){
                 const snapshot=[...elixAdjuntosPendientes];
                 const metadata=snapshot.map(f=>({name:f.name,size:f.size,type:f.type||'',lastModified:f.lastModified||0}));
@@ -2609,18 +2627,33 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
                 setCargando(false);
             }
 
-            // Conservamos visible la orden original; el núcleo leerá ELIX_PROMPT_MODELO_LIMPIO.
+            // El usuario ve su orden completa; el núcleo recibe solo clean_prompt.
             if(input){ input.value=ordenVisible; }
             await elixEnviarMensajeExistente();
 
             const chatDespues=obtenerChatActual();
-            const nuevaRespuesta=elixUltimaRespuestaNueva(chatDespues,indiceAntes);
-            if(!nuevaRespuesta) return; // Si el modelo falló o fue detenido, no descargamos un archivo vacío.
+            const nueva=elixUltimaRespuestaNueva(chatDespues,indiceAntes);
+            if(!nueva) return; // No exportar si el modelo falló o fue detenido.
 
             const nombreFormato=det.format==='docx' ? 'Word' : 'PDF';
+            const scope=String(det.export_scope||'generated_answer');
+            let mensajesExportar=[];
+            let presentation='answer';
+            let titulo=(chatDespues?.title || 'Respuesta de Elix AI').replace(/\.\.\.$/,'');
+
+            if(scope==='full_chat'){
+                mensajesExportar=elixMensajesVisibles(chatDespues).map(x=>x.m);
+                presentation='chat';
+            }else{
+                // Comportamiento profesional por defecto: exportar solo el contenido recién generado.
+                mensajesExportar=[nueva.m];
+                presentation='answer';
+                titulo=elixTituloDesdePrompt(clean) || titulo;
+            }
+
             agregarMensajeUI('assistant',`Contenido terminado. Preparando tu ${nombreFormato}...`,null,[]);
             setCargando(true,`📄 Elix AI preparando ${nombreFormato}...`);
-            await window.elixExportarDocumento('chat',det.format,chatDespues?.id || currentChatId);
+            await window.elixExportarDocumento('chat',det.format,chatDespues?.id || currentChatId,mensajesExportar,titulo,{presentation});
         }catch(error){
             if(error?.name==='AbortError') throw error;
             console.error('Elix AI · generar y exportar:',error);
@@ -2652,7 +2685,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
             return await elixGenerarYExportar(decision,ordenDirecta);
         }
 
-        // Flujo normal sin exportación: queda exactamente como antes.
+        // Flujo normal sin exportación: intacto.
         if(!elixAdjuntosPendientes.length) return await elixEnviarMensajeExistente();
 
         const solicitud=ordenDirecta || 'Analiza los archivos adjuntos.';
@@ -2687,10 +2720,8 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     elixCrearBandejaAdjuntos();
 
     /* =========================================================
-       B) EXPORTACIÓN POR ORDEN DE TEXTO — WORD / PDF
-       WORD NATIVO: DOCX OpenXML real, sin HTML altChunk.
-       Esto evita el aviso de "contenido no legible" de Word móvil.
-       No modifica el chat, modelos, adjuntos, autenticación ni backend.
+       B) ROUTER DE EXPORTACIÓN POR ORDEN DE TEXTO — WORD / PDF
+       Groq interpreta la intención; Elix ejecuta la orden localmente.
        ========================================================= */
     function elixNombreSeguro(s){
         return String(s||'Elix-AI')
@@ -2699,19 +2730,27 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
             .replace(/^-+|-+$/g,'').slice(0,70) || 'Elix-AI';
     }
 
+    function elixTituloDesdePrompt(s=''){
+        const limpio=String(s||'').replace(/\s+/g,' ').trim();
+        if(!limpio) return 'Respuesta de Elix AI';
+        return limpio.slice(0,74).replace(/[.!?,:;\-]+$/,'').trim() || 'Respuesta de Elix AI';
+    }
+
     function elixObtenerChatExportable(chatId=null){
         const id=String(chatId||currentChatId||'');
         return chats.find(c=>String(c.id)===id) || obtenerChatActual();
     }
 
-    function elixMensajesExportables(scope='chat',chatId=null){
-        const chat=elixObtenerChatExportable(chatId);
-        // Las exportaciones por orden siempre incluyen el chat completo.
-        return (chat?.messages||[]).filter(m=>m.role==='user'||m.role==='assistant');
+    function elixContenidoVisibleMensaje(m){
+        return m?.role==='user' ? String(m.displayContent || m.content || '') : String(m?.content || '');
     }
 
-    function elixContenidoVisibleMensaje(m){
-        return m.role==='user' ? String(m.displayContent || m.content || '') : String(m.content || '');
+    function elixMensajesVisibles(chat){
+        return (chat?.messages||[]).map((m,index)=>({m,index})).filter(x=>x.m?.role==='user'||x.m?.role==='assistant');
+    }
+
+    function elixMensajesExportables(scope='chat',chatId=null){
+        return elixMensajesVisibles(elixObtenerChatExportable(chatId)).map(x=>x.m);
     }
 
     function elixNormalizarExportacion(s=''){
@@ -2731,7 +2770,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     function elixFormatoExportacionLocal(texto){
         const n=elixNormalizarExportacion(texto);
         const tokens=n.split(/\s+/).filter(Boolean);
-        if(tokens.some(t=>t==='pdf'||((t.length>=3&&t.length<=4)&&elixDistancia(t,'pdf')<=2))) return 'pdf';
+        if(tokens.some(t=>t==='pdf'||t==='pfd'||((t.length>=3&&t.length<=4)&&elixDistancia(t,'pdf')<=2))) return 'pdf';
         const wordAliases=['word','docx','dox','dovx','dcx','wrd','wodr','wrod','doc'];
         for(const t of tokens){
             if(wordAliases.includes(t)) return 'docx';
@@ -2740,66 +2779,75 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         return null;
     }
 
+    function elixPareceOrdenExportacion(texto){
+        const n=elixNormalizarExportacion(texto);
+        if(!n) return false;
+        if(elixFormatoExportacionLocal(texto)) return true;
+        return /(chat|conversacion|historial).{0,90}(export|convert|transform|descarg|word|doc|pdf|dox|dovx)/.test(n)
+            || /(export|convert|transform|descarg).{0,90}(chat|conversacion|historial)/.test(n);
+    }
+
     function elixTituloObjetivoLocal(texto){
         const n=elixNormalizarExportacion(texto);
         const formato='(?:word|docx|dox|dovx|dcx|wrd|wodr|wrod|doc|pdf|pfd)';
-        // Un chat nombrado exige una señal explícita: "chat de X", "conversación sobre X", etc.
         const rx=new RegExp('(?:chat|conversacion|historial)\\s+(?:de|sobre|llamado|llamada|titulado|titulada)\\s+(.+?)(?:\\s+(?:a|en|como)\\s+(?:formato\\s+)?'+formato+'\\b|$)','i');
         const m=n.match(rx);
         if(!m) return null;
         let q=String(m[1]||'').trim();
         q=q.replace(/\b(todo|toda|el|la|un|una|chat|conversacion|historial|completo|completa|entero|entera|actual|este|esta)\b/g,' ').replace(/\s+/g,' ').trim();
-        if(!q || q.length<3) return null;
-        return q;
-    }
-
-    function elixOrdenExportacionLocal(texto){
-        const n=elixNormalizarExportacion(texto);
-        const format=elixFormatoExportacionLocal(texto);
-        if(!format) return null;
-        const hayAccion=/(dame|entrega|export|genera|crea|descarg|guarda|haz|prepara|pasa|convierte|convert|transform|devuel|manda|quiero|necesito)/.test(n);
-        const hayChat=/(chat|conversacion|historial)/.test(n);
-        if(!hayAccion && !hayChat) return null;
-        const objetivo=hayChat ? elixTituloObjetivoLocal(texto) : null;
-        return {format,target:objetivo?'named':'current',chat_id:null,target_title:objetivo||null,source:'local'};
-    }
-
-    function elixPareceOrdenExportacion(texto){
-        const n=elixNormalizarExportacion(texto);
-        if(!n) return false;
-        if(elixFormatoExportacionLocal(texto)) return true;
-        return /(chat|conversacion|historial).{0,80}(export|convert|transform|descarg|word|doc|pdf|dox|dovx)/.test(n)
-            || /(export|convert|transform|descarg).{0,80}(chat|conversacion|historial)/.test(n);
+        return q.length>=3 ? q : null;
     }
 
     function elixLimpiarPromptExportacionLocal(texto){
         let s=String(texto||'').trim();
-        // Quita cláusulas finales típicas: "y hazme un Word de eso", "y pásamelo a docx", etc.
         s=s.replace(/\s+(?:(?:y\s+(?:luego|despues|después|al\s+final))|y|,)?\s*(?:por\s+favor\s+)?(?:hazme|haz|dame|damelo|dámelo|entregame|entrégame|entregamelo|entrégamelo|pasame|pásame|pasamelo|pásamelo|devuelveme|devuélveme|devuelvemelo|devuélvemelo|mandame|mándame|mandamelo|mándamelo|genera|crea|prepara|exporta|convierte|transforma|guardame|guárdame|guardamelo|guárdamelo|descargame|descárgame|descargamelo|descárgamelo)\s+(?:esto\s+|eso\s+|lo\s+)?(?:en|a|como)?\s*(?:un\s+|una\s+|formato\s+)?(?:word|docx|dox|dovx|dcx|wrd|wodr|wrod|doc|pdf|pfd)(?:\s+(?:de|con)\s+(?:esto|eso|lo anterior))?[.!?\s]*$/i,'').trim();
-        // Quita una petición inicial tipo "hazme un Word sobre X" dejando una tarea útil.
         const inicial=s.match(/^(?:hazme|haz|dame|quiero|necesito|genera|crea|prepara)\s+(?:un\s+|una\s+)?(?:word|docx|dox|dovx|doc|pdf)\s+(?:sobre|de)\s+(.+)$/i);
         if(inicial) s=`Desarrolla ${inicial[1].trim()}`;
         return s;
     }
 
-    function elixClasificarExportacionLocal(texto){
-        const base=elixOrdenExportacionLocal(texto);
-        if(!base) return null;
+    function elixScopeLocal(texto){
         const n=elixNormalizarExportacion(texto);
+        if(/(ultima|ultimo)\s+(respuesta|mensaje)|solo\s+(tu|la)\s+(respuesta|explicacion)\s+(anterior|ultima)|\b(eso|lo anterior)\b/.test(n)) return 'last_answer';
+        if(/solo\s+(la\s+)?parte|parte\s+(donde|en que|sobre)|desde\s+.+\s+hasta|solo\s+(lo|las|los)\s+.+\s+sobre|fragmento|seccion/.test(n)) return 'selection';
+        return 'full_chat';
+    }
+
+    function elixClasificarExportacionLocal(texto){
+        const format=elixFormatoExportacionLocal(texto);
+        if(!format) return null;
+        const n=elixNormalizarExportacion(texto);
+        const hayAccion=/(dame|entrega|export|genera|crea|descarg|guarda|haz|prepara|pasa|convierte|convert|transform|devuel|manda|quiero|necesito)/.test(n);
+        const hayChat=/(chat|conversacion|historial)/.test(n);
+        if(!hayAccion && !hayChat) return null;
+
         const objetivo=elixTituloObjetivoLocal(texto);
-        if(objetivo){
-            return {intent:'export_named',format:base.format,target:'named',target_title:objetivo,chat_id:null,clean_prompt:null,source:'local-fallback'};
-        }
-        const referenciaExistente=/(todo\s+el\s+chat|este\s+chat|chat\s+actual|la\s+conversacion|esta\s+conversacion|todo\s+el\s+historial|historial\s+actual|todo\s+lo\s+anterior|lo\s+anterior)/.test(n);
+        const scope=elixScopeLocal(texto);
         const clean=elixLimpiarPromptExportacionLocal(texto);
-        if(referenciaExistente || !clean || clean===String(texto||'').trim()){
-            // Si es una orden pura de exportación, actúa sobre el chat actual.
-            const palabras=n.split(/\s+/).filter(Boolean);
-            const contenido=palabras.filter(w=>!/(hazme|haz|dame|entrega|exporta|exportar|convierte|convertir|transforma|transformar|descarga|descargar|prepara|word|docx|dox|dovx|doc|pdf|pfd|chat|conversacion|historial|todo|este|esta|actual|en|a|un|una|de|lo|por|favor)/.test(w));
-            if(referenciaExistente || contenido.length<=2)
-                return {intent:'export_current',format:base.format,target:'current',target_title:null,chat_id:null,clean_prompt:null,source:'local-fallback'};
+        const referenciaExistente=/(todo\s+el\s+chat|este\s+chat|chat\s+actual|la\s+conversacion|esta\s+conversacion|todo\s+el\s+historial|historial\s+actual|todo\s+lo\s+anterior|lo\s+anterior|ultima\s+respuesta|solo\s+la\s+parte)/.test(n);
+        const palabras=n.split(/\s+/).filter(Boolean);
+        const contenido=palabras.filter(w=>!/(hazme|haz|dame|entrega|exporta|exportar|convierte|convertir|transforma|transformar|descarga|descargar|prepara|word|docx|dox|dovx|doc|pdf|pfd|chat|conversacion|historial|todo|este|esta|actual|en|a|un|una|de|lo|por|favor)/.test(w));
+
+        if(objetivo){
+            return {intent:'export_named',format,export_scope:scope,target:'named',target_title:objetivo,chat_id:null,clean_prompt:null,selection_query:scope==='selection'?texto:null,source:'local-fallback'};
         }
-        return {intent:'generate_then_export',format:base.format,target:'current',target_title:null,chat_id:null,clean_prompt:clean||String(texto||'').trim(),source:'local-fallback'};
+        // Si al quitar la cláusula de exportación queda una tarea sustantiva, primero se genera el contenido.
+        if(!referenciaExistente && clean && clean!==String(texto||'').trim()){
+            return {intent:'generate_then_export',format,export_scope:'generated_answer',target:'current',target_title:null,chat_id:null,clean_prompt:clean,selection_query:null,source:'local-fallback'};
+        }
+        if(referenciaExistente || !clean || clean===String(texto||'').trim() || contenido.length<=1){
+            return {intent:'export_current',format,export_scope:scope,target:'current',target_title:null,chat_id:null,clean_prompt:null,selection_query:scope==='selection'?texto:null,source:'local-fallback'};
+        }
+        return {intent:'generate_then_export',format,export_scope:'generated_answer',target:'current',target_title:null,chat_id:null,clean_prompt:clean||String(texto||'').trim(),selection_query:null,source:'local-fallback'};
+    }
+
+    function elixVistaPreviaChat(chat){
+        const visibles=elixMensajesVisibles(chat);
+        if(!visibles.length) return '';
+        const muestras=[];
+        for(const x of visibles.slice(0,2)) muestras.push(elixContenidoVisibleMensaje(x.m));
+        for(const x of visibles.slice(-2)) muestras.push(elixContenidoVisibleMensaje(x.m));
+        return muestras.join(' | ').replace(/\s+/g,' ').slice(0,620);
     }
 
     function elixSimilitudTitulo(a,b){
@@ -2826,25 +2874,28 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         if(!q) return {chat:null,found:false};
         let best=null,bestScore=0;
         for(const c of chats){
-            const score=elixSimilitudTitulo(q,c.title||'');
+            const score=Math.max(elixSimilitudTitulo(q,c.title||''), elixSimilitudTitulo(q,elixVistaPreviaChat(c))*.78);
             if(score>bestScore){bestScore=score;best=c;}
         }
-        return best && bestScore>=.48 ? {chat:best,found:true} : {chat:null,found:false};
+        return best && bestScore>=.44 ? {chat:best,found:true} : {chat:null,found:false};
     }
 
     function elixNormalizarDecisionRouter(d,texto){
         if(!d || typeof d!=='object') return null;
-        const allowed=new Set(['export_current','export_named','generate_then_export','none']);
-        const intent=allowed.has(String(d.intent||'')) ? String(d.intent) : 'none';
+        const allowedIntent=new Set(['export_current','export_named','generate_then_export','none']);
+        const allowedScope=new Set(['full_chat','last_answer','selection','generated_answer']);
+        const intent=allowedIntent.has(String(d.intent||'')) ? String(d.intent) : 'none';
         if(intent==='none') return null;
         const format=String(d.format||'').toLowerCase()==='pdf' ? 'pdf' : 'docx';
+        const export_scope=allowedScope.has(String(d.export_scope||'')) ? String(d.export_scope) : (intent==='generate_then_export'?'generated_answer':'full_chat');
         const clean=String(d.clean_prompt||'').trim();
         return {
-            intent, format,
+            intent, format, export_scope,
             target:intent==='export_named'?'named':'current',
             target_title:String(d.target_title||'').trim()||null,
             chat_id:d.chat_id||null,
             clean_prompt:intent==='generate_then_export' ? (clean || elixLimpiarPromptExportacionLocal(texto)) : null,
+            selection_query:String(d.selection_query||'').trim()||null,
             source:String(d.source||'groq')
         };
     }
@@ -2852,25 +2903,92 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     async function elixConsultarRouterGroq(texto){
         try{
             const payload={
+                mode:'classify',
                 text:String(texto||''),
                 current_chat_id:String(currentChatId||''),
                 current_chat_title:String(obtenerChatActual()?.title||''),
-                chats:(chats||[]).slice(0,80).map(c=>({id:String(c.id),title:String(c.title||'')}))
+                chats:(chats||[]).slice(0,80).map(c=>({id:String(c.id),title:String(c.title||''),preview:elixVistaPreviaChat(c)}))
             };
             const r=await elixBackend('elix-export-router',payload);
             if(!r?.ok || !r?.decision) return null;
             return elixNormalizarDecisionRouter({...r.decision,source:'groq'},texto);
         }catch(e){
-            // El router nunca debe romper Elix AI. Si Groq no está disponible, cae al clasificador local.
             console.warn('Elix AI usó clasificación local de exportación.',e);
             return null;
         }
     }
 
-    window.elixDetectarSolicitudExportacion=function(texto){
-        return elixClasificarExportacionLocal(texto);
-    };
+    async function elixConsultarSeleccionGroq(det,chat,ordenVisible){
+        try{
+            const payload={
+                mode:'select_messages',
+                text:String(ordenVisible||''),
+                selection_query:String(det?.selection_query||ordenVisible||''),
+                chat:{
+                    id:String(chat?.id||''),
+                    title:String(chat?.title||''),
+                    messages:elixMensajesVisibles(chat).slice(0,160).map(x=>({index:x.index,role:x.m.role,text:elixContenidoVisibleMensaje(x.m).slice(0,4000)}))
+                }
+            };
+            const r=await elixBackend('elix-export-router',payload);
+            const idx=Array.isArray(r?.selection?.message_indices) ? r.selection.message_indices.map(Number).filter(Number.isInteger) : [];
+            return [...new Set(idx)].sort((a,b)=>a-b);
+        }catch(e){
+            console.warn('Elix AI usó selección local de fragmentos.',e);
+            return [];
+        }
+    }
 
+    function elixSeleccionLocal(chat,query,ordenVisible=''){
+        const visibles=elixMensajesVisibles(chat);
+        const q=elixNormalizarExportacion(query||ordenVisible);
+        const stop=new Set(['solo','parte','donde','cuando','sobre','desde','hasta','chat','conversacion','word','docx','dox','dovx','pdf','exporta','convierte','transforma','dame','pasame','respuesta','explicacion','mensaje','los','las','del','una','uno','que','con','por','para','este','esta','eso']);
+        const terms=q.split(/\s+/).filter(x=>x.length>2&&!stop.has(x));
+        if(!terms.length) return [];
+        const soloAssistant=/(solo\s+(tu|la)\s+(respuesta|explicacion)|solo\s+elix)/.test(q);
+        const scored=[];
+        for(const x of visibles){
+            if(soloAssistant && x.m.role!=='assistant') continue;
+            const t=elixNormalizarExportacion(elixContenidoVisibleMensaje(x.m));
+            if(!t) continue;
+            let hits=0; for(const term of terms) if(t.includes(term)) hits++;
+            const score=hits/terms.length;
+            if(score>0) scored.push({x,score});
+        }
+        if(!scored.length) return [];
+        const best=Math.max(...scored.map(s=>s.score));
+        if(best<.34) return [];
+        const selected=new Set(scored.filter(s=>s.score>=Math.max(.34,best*.72)).map(s=>s.x.index));
+        if(!soloAssistant){
+            for(const idx of [...selected]){
+                const pos=visibles.findIndex(v=>v.index===idx);
+                const cur=visibles[pos];
+                if(cur?.m.role==='assistant' && pos>0 && visibles[pos-1].m.role==='user') selected.add(visibles[pos-1].index);
+                if(cur?.m.role==='user' && pos+1<visibles.length && visibles[pos+1].m.role==='assistant') selected.add(visibles[pos+1].index);
+            }
+        }
+        return [...selected].sort((a,b)=>a-b);
+    }
+
+    async function elixResolverPaqueteExportacion(det,chat,ordenVisible){
+        const visibles=elixMensajesVisibles(chat);
+        if(!visibles.length) return {mensajes:[],titulo:chat?.title||'Elix AI',presentation:'chat'};
+        const scope=String(det?.export_scope||'full_chat');
+        if(scope==='last_answer'){
+            const last=[...visibles].reverse().find(x=>x.m.role==='assistant' && !x.m.isError && String(x.m.content||'').trim());
+            return {mensajes:last?[last.m]:[],titulo:`${chat?.title||'Elix AI'} — última respuesta`,presentation:'answer'};
+        }
+        if(scope==='selection'){
+            let indices=await elixConsultarSeleccionGroq(det,chat,ordenVisible);
+            if(!indices.length) indices=elixSeleccionLocal(chat,det?.selection_query||ordenVisible,ordenVisible);
+            const set=new Set(indices.map(Number));
+            const mensajes=visibles.filter(x=>set.has(x.index)).map(x=>x.m);
+            return {mensajes,titulo:`${chat?.title||'Elix AI'} — selección`,presentation:mensajes.length===1&&mensajes[0]?.role==='assistant'?'answer':'chat'};
+        }
+        return {mensajes:visibles.map(x=>x.m),titulo:chat?.title||'Conversación Elix AI',presentation:'chat'};
+    }
+
+    window.elixDetectarSolicitudExportacion=function(texto){ return elixClasificarExportacionLocal(texto); };
     window.elixDetectarSolicitudExportacionInteligente=async function(texto){
         if(!elixPareceOrdenExportacion(texto)) return null;
         const viaGroq=await elixConsultarRouterGroq(texto);
@@ -3074,7 +3192,7 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         if(w>maxW){ h*=maxW/w; w=maxW; }
         const cx=Math.round(w*9525), cy=Math.round(h*9525);
         const docId=state.nextDocPr++;
-        return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${docId}" name="${elixWordAttr(nombre)}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${docId}" name="${elixWordAttr(nombre)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+        return `<w:r><w:drawing><wp:inline><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${docId}" name="${elixWordAttr(nombre)}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="${elixWordAttr(nombre)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
     }
 
     async function elixWordImagenDesdeSrc(src){
@@ -3344,61 +3462,57 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         }
     }
 
-    async function elixExportarWord(scope='chat',chatId=null){
+    async function elixExportarWord(scope='chat',chatId=null,mensajesOverride=null,tituloOverride=null,opciones={}){
         if(typeof JSZip==='undefined'){
-            alert('Elix AI no pudo cargar el generador nativo de Word. Recarga la página e inténtalo otra vez.');
+            alert('Elix AI no pudo cargar el generador de Word. Actualiza la página e inténtalo otra vez.');
             return;
         }
-        const mensajes=elixMensajesExportables('chat',chatId);
+        const mensajes=Array.isArray(mensajesOverride) ? mensajesOverride.filter(Boolean) : elixMensajesExportables('chat',chatId);
         if(!mensajes.length){ alert('No hay contenido de Elix AI para convertir a Word.'); return; }
 
         const chat=elixObtenerChatExportable(chatId);
-        const titulo=(chat?.title || 'Conversación Elix AI').replace(/\.\.\.$/,'');
+        const titulo=String(tituloOverride || chat?.title || 'Conversación Elix AI').replace(/\.\.\.$/,'').trim() || 'Elix AI';
+        const presentation=String(opciones?.presentation||'chat');
 
         try{
             setCargando(true,'📝 Elix AI construyendo Word compatible...');
             const state={rels:[],media:[],nextRel:2,nextDocPr:1};
             let body='';
 
-            {
-                for(const m of mensajes){
+            body+=`<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:spacing w:after="180"/></w:pPr>${elixWordRunTexto(titulo,{bold:true})}</w:p>`;
+
+            for(const m of mensajes){
+                if(presentation!=='answer'){
                     const role=m.role==='user'?'Tú':'Elix AI';
-                    body+=`<w:p><w:pPr><w:pStyle w:val="Heading3"/><w:spacing w:before="240" w:after="100"/></w:pPr>${elixWordRunTexto(role,{bold:true,color:m.role==='user'?'4B5563':'1D4ED8'})}</w:p>`;
-                    const root=document.createElement('div');
-                    root.innerHTML=elixWordMarcadoresMatematicos(elixContenidoVisibleMensaje(m));
-                    body+=await elixWordBloquesDesdeContainer(root,state,false);
-                    body+='<w:p><w:pPr><w:spacing w:after="80"/></w:pPr></w:p>';
+                    body+=`<w:p><w:pPr><w:pStyle w:val="Heading3"/><w:spacing w:before="180" w:after="70"/></w:pPr>${elixWordRunTexto(role,{bold:true,color:m.role==='user'?'4B5563':'1D4ED8'})}</w:p>`;
                 }
+                const root=document.createElement('div');
+                root.innerHTML=elixWordMarcadoresMatematicos(elixContenidoVisibleMensaje(m));
+                body+=await elixWordBloquesDesdeContainer(root,state,false);
             }
 
+            // Crédito visible pero discreto; evita usar propiedades Core no válidas.
+            body+=`<w:p><w:pPr><w:spacing w:before="220" w:after="0"/><w:jc w:val="center"/></w:pPr>${elixWordRunTexto('© InOutBio.Os',{color:'8A8A8A'})}</w:p>`;
             body+=`<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1020" w:right="1020" w:bottom="1134" w:left="1020" w:header="500" w:footer="500" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
 
-            const documentXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}</w:body></w:document>`;
+            const documentXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" mc:Ignorable="w14 wp14"><w:body>${body}</w:body></w:document>`;
 
             const relStyles='<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
             const docRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relStyles}${state.rels.join('')}</Relationships>`;
-            const contentTypes=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
-            const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
-            const now=new Date().toISOString();
-            const core=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${elixWordXml(titulo)}</dc:title><dc:creator>InOutBio.Os</dc:creator><cp:lastModifiedBy>Elix AI</cp:lastModifiedBy><dc:rights>© InOutBio.Os</dc:rights><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
-            const app=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Template>Normal.dotm</Template><TotalTime>0</TotalTime><Pages>1</Pages><Words>0</Words><Characters>0</Characters><Application>Elix AI</Application><DocSecurity>0</DocSecurity><Lines>0</Lines><Paragraphs>0</Paragraphs><ScaleCrop>false</ScaleCrop><Manager></Manager><Company>InOutBio.Os</Company><LinksUpToDate>false</LinksUpToDate><CharactersWithSpaces>0</CharactersWithSpaces><SharedDoc>false</SharedDoc><HyperlinkBase></HyperlinkBase><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion></Properties>`;
-
+            const contentTypes=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`;
+            const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
             const stylesXml=elixWordStylesXml();
 
-            // Validación de XML antes de empaquetar. Si algo se rompe, no descargamos
-            // un archivo que Word vaya a intentar reparar.
+            // Validación previa: XML bien formado y relaciones internas coherentes.
             elixWordValidarXml('word/document.xml',documentXml);
             elixWordValidarXml('word/styles.xml',stylesXml);
             elixWordValidarXml('word/_rels/document.xml.rels',docRels);
             elixWordValidarXml('[Content_Types].xml',contentTypes);
             elixWordValidarXml('_rels/.rels',rootRels);
-            elixWordValidarXml('docProps/core.xml',core);
-            elixWordValidarXml('docProps/app.xml',app);
 
             const zip=new JSZip();
             zip.file('[Content_Types].xml',contentTypes);
             zip.folder('_rels').file('.rels',rootRels);
-            zip.folder('docProps').file('core.xml',core).file('app.xml',app);
             const word=zip.folder('word');
             word.file('document.xml',documentXml);
             word.file('styles.xml',stylesXml);
@@ -3420,18 +3534,20 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     }
 
     // PDF conserva el flujo que ya tenía Elix AI; solo se invoca por texto.
-    async function elixExportarPDF(scope='chat',chatId=null){
-        const mensajes=elixMensajesExportables('chat',chatId);
+    async function elixExportarPDF(scope='chat',chatId=null,mensajesOverride=null,tituloOverride=null,opciones={}){
+        const mensajes=Array.isArray(mensajesOverride) ? mensajesOverride.filter(Boolean) : elixMensajesExportables('chat',chatId);
         if(!mensajes.length) return alert('No hay contenido para exportar.');
         const chat=elixObtenerChatExportable(chatId);
-        const titulo=chat?.title || 'Conversación Elix AI';
+        const titulo=String(tituloOverride || chat?.title || 'Conversación Elix AI');
         const fecha=new Intl.DateTimeFormat('es-EC',{dateStyle:'long',timeStyle:'short'}).format(new Date());
         document.getElementById('elix-print-root')?.remove();
         const root=document.createElement('div');
         root.id='elix-print-root';
+        const answerOnly=String(opciones?.presentation||'chat')==='answer';
         root.innerHTML=`<header class="elix-print-header"><div class="elix-print-brand">Elix AI · © InOutBio.Os</div><h1>${escapeHTML(titulo)}</h1><div class="elix-print-meta">${escapeHTML(fecha)}</div></header><div class="elix-print-copyright">© InOutBio.Os</div>` + mensajes.map(m=>{
             const role=m.role==='user' ? 'Tú' : 'Elix AI';
-            return `<section class="elix-pdf-message ${m.role==='user'?'is-user':'is-ai'}"><div class="elix-pdf-role">${role}</div><div class="elix-pdf-body">${formatTextoMarkdown(elixContenidoVisibleMensaje(m))}</div></section>`;
+            const roleHtml=answerOnly ? '' : `<div class="elix-pdf-role">${role}</div>`;
+            return `<section class="elix-pdf-message ${m.role==='user'?'is-user':'is-ai'}">${roleHtml}<div class="elix-pdf-body">${formatTextoMarkdown(elixContenidoVisibleMensaje(m))}</div></section>`;
         }).join('');
         document.body.appendChild(root);
         try{
@@ -3450,9 +3566,9 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     }
 
     // No hay botones: esta función solo la llama la orden escrita en el chat.
-    window.elixExportarDocumento=async function(scope='chat',format='docx',chatId=null){
-        if(format==='docx') return await elixExportarWord('chat',chatId);
-        if(format==='pdf') return await elixExportarPDF('chat',chatId);
+    window.elixExportarDocumento=async function(scope='chat',format='docx',chatId=null,mensajesOverride=null,tituloOverride=null,opciones={}){
+        if(format==='docx') return await elixExportarWord('chat',chatId,mensajesOverride,tituloOverride,opciones);
+        if(format==='pdf') return await elixExportarPDF('chat',chatId,mensajesOverride,tituloOverride,opciones);
     };
 
     // Compatibilidad interna; no se muestra ningún botón de exportación.
@@ -3488,6 +3604,64 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
         o.addEventListener('click',e=>{if(e.target===o)o.remove();});
     }
     window.mostrarLegalElix=mostrarLegal;
+
+    function mostrarManualUsuario(){
+        document.querySelector('.elix-legal-overlay')?.remove();
+        const o=document.createElement('div');
+        o.className='elix-legal-overlay';
+        o.innerHTML=`<div class="elix-legal-box elix-manual-box" role="dialog" aria-modal="true" aria-labelledby="elix-manual-title">
+            <button class="elix-legal-close" type="button">Cerrar</button>
+            <h2 id="elix-manual-title">Manual de usuario — Elix AI</h2>
+            <div class="elix-manual-intro"><strong>Elix AI</strong> reúne conversación, análisis académico, lectura de archivos e imágenes, búsqueda cuando es necesaria y exportación profesional. Puedes usar lenguaje natural: no necesitas aprender comandos rígidos.</div>
+
+            <div class="elix-manual-grid">
+                <section class="elix-manual-card"><h3>1. Chats y análisis</h3><p>Usa <strong>+ Nuevo Análisis</strong> para iniciar un tema independiente. Los chats aparecen en la barra lateral; puedes abrirlos, renombrarlos o eliminarlos. Conviene usar un chat por tema para mantener el contexto ordenado.</p></section>
+                <section class="elix-manual-card"><h3>2. Modos de análisis</h3><p><strong>Rápido</strong> prioriza respuestas directas. <strong>Estándar</strong> equilibra claridad y profundidad. <strong>Riguroso</strong> exige mayor formalidad técnica. <strong>Profundo</strong> aplica el máximo nivel de rigor disponible para tareas complejas.</p></section>
+                <section class="elix-manual-card"><h3>3. Modo académico</h3><p>APA 7, Vancouver e IEEE activan una respuesta orientada a citas y referencias. Si el modo académico está desactivado, Elix AI decide automáticamente si una consulta necesita búsqueda externa. Puedes indicar expresamente “no busques en internet” cuando quieras trabajar solo con el material aportado.</p></section>
+                <section class="elix-manual-card"><h3>4. Cómo escribir un buen prompt</h3><p>Indica la tarea, el nivel de detalle, el formato esperado y cualquier restricción. Para mejores resultados, formula una instrucción completa.</p><span class="elix-manual-example">Analiza el archivo adjunto, explica los resultados paso a paso y destaca las conclusiones principales.</span></section>
+            </div>
+
+            <h3>5. Archivos e imágenes</h3>
+            <p>Puedes adjuntar imágenes, PDF, Word, PowerPoint, Excel, TXT, CSV, Markdown y JSON. Elix AI prepara el contenido antes de responder para conservar texto, tablas, fórmulas, gráficos, imágenes y datos relevantes cuando el formato lo permite.</p>
+            <ul><li><strong>Imágenes:</strong> se normalizan automáticamente para mejorar compatibilidad y lectura.</li><li><strong>PDF:</strong> los documentos grandes pueden procesarse página por página.</li><li><strong>Word/PowerPoint:</strong> se analiza el texto y también los elementos visuales extraíbles.</li><li><strong>Excel:</strong> se leen hojas, datos y fórmulas; los elementos visuales compatibles también pueden analizarse.</li></ul>
+            <div class="elix-manual-note">Si una parte de una imagen o documento no es legible, formula la pregunta indicando exactamente qué zona, tabla, ecuación o página quieres revisar.</div>
+
+            <h3>6. Exportar a Word o PDF mediante el chat</h3>
+            <p>La exportación se solicita escribiendo una orden. Elix AI distingue entre exportar contenido existente y generar contenido nuevo antes de crear el archivo.</p>
+            <span class="elix-manual-example">Convierte todo este chat en Word.</span>
+            <span class="elix-manual-example">Pásame tu última respuesta a Word.</span>
+            <span class="elix-manual-example">Exporta solo la parte donde hablamos de números irracionales a Word.</span>
+            <span class="elix-manual-example">Exporta el chat de Química orgánica a Word.</span>
+            <span class="elix-manual-example">Investiga la Segunda Guerra Mundial y al final hazme un Word de la respuesta.</span>
+            <p>Si pides contenido nuevo y un archivo, Elix AI primero realiza la tarea y después exporta <strong>solo el contenido recién generado</strong>, salvo que indiques expresamente “todo el chat”. También se toleran errores comunes al escribir Word/DOCX.</p>
+
+            <h3>7. Exportar una parte específica</h3>
+            <p>Puedes pedir un tema, fragmento o respuesta concreta del chat. Sé descriptivo cuando existan varias partes parecidas.</p>
+            <span class="elix-manual-example">Solo la explicación de la ley de Ohm, sin el resto del chat, en Word.</span>
+            <span class="elix-manual-example">Desde la pregunta sobre mitosis hasta la tabla comparativa, pásalo a Word.</span>
+
+            <h3>8. Ecuaciones, tablas e imágenes en Word</h3>
+            <p>Las ecuaciones se preparan con tamaño proporcional para evitar fórmulas gigantes. Los títulos, listas, tablas, enlaces e imágenes compatibles se convierten a una estructura de documento. Las ecuaciones en bloque se centran automáticamente y las ecuaciones en línea permanecen integradas en el párrafo.</p>
+
+            <h3>9. Detener y editar</h3>
+            <p>Si una solicitud tarda demasiado o necesitas cambiarla, utiliza el control de detener cuando esté disponible. Puedes editar o volver a enviar una instrucción para corregir el enfoque sin crear otro chat.</p>
+
+            <h3>10. Recomendaciones</h3>
+            <ul><li>Usa un chat separado para trabajos extensos diferentes.</li><li>Indica páginas o secciones cuando un documento sea muy largo.</li><li>Revisa datos importantes antes de utilizarlos en trabajos académicos o decisiones relevantes.</li><li>Para una exportación limpia, especifica “última respuesta”, “parte sobre…” o “todo el chat”.</li></ul>
+
+            <h3>11. Privacidad, sesión y seguridad</h3>
+            <p>La sesión puede mantenerse iniciada en el dispositivo hasta que cierres sesión o el acceso deje de ser válido. No compartas tus credenciales y evita cargar información de terceros si no tienes autorización para procesarla.</p>
+
+            <h3>12. Si algo no funciona</h3>
+            <ul><li>Actualiza la página y vuelve a intentar la operación.</li><li>Comprueba que el archivo no esté dañado y que use un formato admitido.</li><li>Si una selección para exportar es ambigua, describe el tema con más precisión.</li><li>Si una respuesta importante parece incompleta, solicita una verificación o vuelve a formular la instrucción.</li></ul>
+
+            <div class="elix-legal-brand">© InOutBio.Os · Manual de usuario de Elix AI<br><span>Desarrollador: Sebastián Neto Ibarra</span></div>
+        </div>`;
+        document.body.appendChild(o);
+        o.querySelector('.elix-legal-close').onclick=()=>o.remove();
+        o.addEventListener('click',e=>{if(e.target===o)o.remove();});
+    }
+    window.mostrarManualElix=mostrarManualUsuario;
 
     // Toggle de sidebar en PC.
     const top=document.querySelector('.top-bar');
@@ -3527,9 +3701,9 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     if(sidebar && !sidebar.querySelector('.elix-account-panel')) {
         const p=document.createElement('div');
         p.className='elix-account-panel';
-        p.innerHTML=`<div id="elix-account-name" class="elix-account-name">Cuenta: comprobando acceso...</div><div class="elix-account-actions"><button type="button" id="elix-legal-btn">Licencia</button><button type="button" id="elix-logout-btn" style="display:none">Cerrar sesión</button></div><div class="elix-account-copyright">© InOutBio.Os</div>`;
+        p.innerHTML=`<div id="elix-account-name" class="elix-account-name">Cuenta: comprobando acceso...</div><div class="elix-account-actions"><button type="button" id="elix-manual-btn">Manual de usuario</button><button type="button" id="elix-logout-btn" style="display:none">Cerrar sesión</button></div><div class="elix-account-copyright">© InOutBio.Os</div>`;
         sidebar.appendChild(p);
-        p.querySelector('#elix-legal-btn').onclick=mostrarLegal;
+        p.querySelector('#elix-manual-btn').onclick=mostrarManualUsuario;
     }
 
     /* =========================================================
