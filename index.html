@@ -2770,21 +2770,42 @@ Solicitud posterior: ${solicitud || 'Analizar el PDF adjunto.'}`;
     function elixFormatoExportacionLocal(texto){
         const n=elixNormalizarExportacion(texto);
         const tokens=n.split(/\s+/).filter(Boolean);
-        if(tokens.some(t=>t==='pdf'||t==='pfd'||((t.length>=3&&t.length<=4)&&elixDistancia(t,'pdf')<=2))) return 'pdf';
-        const wordAliases=['word','docx','dox','dovx','dcx','wrd','wodr','wrod','doc'];
-        for(const t of tokens){
-            if(wordAliases.includes(t)) return 'docx';
-            if(t.length>=3 && t.length<=6 && (elixDistancia(t,'word')<=2 || elixDistancia(t,'docx')<=2)) return 'docx';
-        }
+
+        // IMPORTANTE: no usar distancia de Levenshtein sobre cualquier palabra del prompt.
+        // Palabras normales como "por" podían parecerse artificialmente a "pdf" y activar
+        // el router de exportación en consultas académicas que no pedían ningún archivo.
+        const pdfAliases=new Set(['pdf','pfd','pdff']);
+        const wordAliases=new Set([
+            'word','docx','doc','dox','dovx','dcx','dcox','doxc','doxx','docc','docs',
+            'wrd','wodr','wrod','worrd'
+        ]);
+
+        if(tokens.some(t=>pdfAliases.has(t))) return 'pdf';
+        if(tokens.some(t=>wordAliases.has(t))) return 'docx';
         return null;
     }
 
     function elixPareceOrdenExportacion(texto){
         const n=elixNormalizarExportacion(texto);
         if(!n) return false;
-        if(elixFormatoExportacionLocal(texto)) return true;
-        return /(chat|conversacion|historial).{0,90}(export|convert|transform|descarg|word|doc|pdf|dox|dovx)/.test(n)
-            || /(export|convert|transform|descarg).{0,90}(chat|conversacion|historial)/.test(n);
+
+        const format=elixFormatoExportacionLocal(texto);
+        const accionFuerte=/\b(exporta|exportar|convierte|convertir|transforma|transformar|descarga|descargar|guardame|guardar|guarda)\b/.test(n);
+        const accionEntrega=/\b(hazme|dame|damelo|entregame|pasame|devuelveme|mandame|preparame|generame|creame|quiero|necesito)\b/.test(n);
+        const objetoExistente=/\b(chat|conversacion|historial|respuesta|mensaje|parte|fragmento|seccion|seleccion|lo anterior|eso)\b/.test(n);
+
+        // Verbos inequívocos de exportación + referencia a chat/documento: consultar al router
+        // aunque el usuario haya escrito muy mal el formato.
+        if(accionFuerte && objetoExistente) return true;
+
+        // Si reconocemos un formato, exigimos además intención real de entrega/exportación.
+        // Así "analiza este PDF" o "qué es Word" siguen siendo preguntas normales.
+        if(format && (accionFuerte || accionEntrega || objetoExistente)) return true;
+
+        // Formas breves naturales sin verbo explícito: "chat en Word", "la última respuesta en docx".
+        if(format && /\b(chat|conversacion|historial|ultima respuesta|ultimo mensaje|parte|fragmento|seccion)\b/.test(n)) return true;
+
+        return false;
     }
 
     function elixTituloObjetivoLocal(texto){
